@@ -70,6 +70,7 @@ class TripleStore:
         self._by_o: Dict[int, array] = {}
         self._prov: Dict[int, List[Provenance]] = {}
         self._chunks: Dict[str, str] = {}
+        self._chunk_source: Dict[str, str] = {}
         self._emb: Dict[str, List[float]] = {}
         # normalised alias -> (alias as given, canonical name)
         self._aliases: Dict[str, Tuple[str, str]] = {}
@@ -295,9 +296,21 @@ class TripleStore:
         self._rebuild({old: new})
         return before - len(self)
 
-    def _rebuild(self, mapping: Dict[str, str]) -> None:
-        """Re-insert every triple with entity names replaced per `mapping`."""
-        old = [(self.get(t), self._prov.get(t, [])) for t in range(len(self._s))]
+    def _rebuild(self, mapping: Dict[str, str], drop_source: Optional[str] = None) -> None:
+        """Re-insert every triple with entity names replaced per `mapping`.
+
+        If drop_source is set, that source's provenance is removed and triples
+        left with no provenance are dropped.
+        """
+        old = []
+        for t in range(len(self._s)):
+            records = self._prov.get(t, [])
+            if drop_source is not None:
+                remaining = [r for r in records if r.source != drop_source]
+                if records and not remaining:
+                    continue
+                records = remaining
+            old.append((self.get(t), records))
         self._terms = Interner()
         self._s, self._p, self._o = array("I"), array("I"), array("I")
         self._seen = set()
@@ -464,14 +477,28 @@ class TripleStore:
         """Return the text of an ingested chunk, or None if unknown."""
         return self._chunks.get(chunk_id)
 
-    def ingest(self, docs, llm, max_chars: int = 2000, min_confidence: float = 0.0, source: Optional[str] = None) -> int:
-        """Extract triples from text with an LLM and add them. Returns the count of new triples.
+    def ingest(
+        self,
+        docs,
+        llm,
+        max_chars: int = 2000,
+        min_confidence: float = 0.0,
+        source: Optional[str] = None,
+        replace: bool = True,
+    ) -> int:
+        """Extract triples from text with an LLM and store them. Returns how many distinct triples were stored.
 
         docs is a string, a list of strings, or a dict {source_name: text}.
         For a string or list, `source` names the document (None if not given).
         Each fact records its source, chunk ID ("<source>#<n>"), confidence
         and timestamp. Requires a schema. Triples that fail the schema or
         fall below min_confidence are skipped.
+
+        With replace=True (default), re-ingesting a named source first removes
+        that source's earlier facts, so edited documents do not leave stale
+        facts behind. Facts from other sources, and facts shared with them,
+        stay. All documents are extracted before anything is replaced, so a
+        failed LLM call changes nothing.
         """
         from .extract import extract_triples
 
@@ -483,22 +510,56 @@ class TripleStore:
             docs = list(docs.items())
         else:
             docs = [(source, d) for d in docs]
-        before = len(self)
-        for name, doc in docs:
-            for t in extract_triples(doc, self.schema, llm, max_chars):
-                if t["confidence"] < min_confidence:
-                    continue
+        extracted = [
+            (name, [t for t in extract_triples(doc, self.schema, llm, max_chars) if t["confidence"] >= min_confidence])
+            for name, doc in docs
+        ]
+        stored = set()
+        for name, triples in extracted:
+            if replace and name:
+                self.remove_source(name)
+            for t in triples:
                 chunk_id = f"{name}#{t['chunk_index']}" if name else f"#{t['chunk_index']}"
                 try:
-                    self.add(
+                    tid = self.add(
                         t["subject"], t["predicate"], t["object"],
                         t["subject_type"], t["object_type"],
                         source=name, chunk_id=chunk_id, confidence=t["confidence"],
                     )
                 except SchemaError:
                     continue  # e.g. entity already typed differently
+                stored.add(tid)
                 self._chunks.setdefault(chunk_id, t["chunk"])
-        return len(self) - before
+                if name:
+                    self._chunk_source[chunk_id] = name
+        return len(stored)
+
+    def sources(self) -> List[str]:
+        """Names of all sources that have facts in the store."""
+        return sorted({r.source for records in self._prov.values() for r in records if r.source})
+
+    def remove_source(self, source: str) -> int:
+        """Remove everything that came from `source`. Returns the number of triples deleted.
+
+        A triple is deleted only if no other source also backs it. If other
+        sources do, the triple stays and only this source's provenance is
+        dropped. Entities left without any triple lose their type and
+        vector. Aliases from merge() are kept. Facts added without a source
+        are never removed.
+        """
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty string")
+        before = len(self)
+        self._rebuild({}, drop_source=source)
+        for chunk_id in [c for c, s in self._chunk_source.items() if s == source]:
+            self._chunks.pop(chunk_id, None)
+            del self._chunk_source[chunk_id]
+        present = set(self.entities())
+        for name in [n for n in self._types if n not in present]:
+            del self._types[name]
+        for name in [n for n in self._emb if n not in present]:
+            del self._emb[name]
+        return before - len(self)
 
     def _resolve_type(self, entity: str, given: Optional[str]) -> Optional[str]:
         known = self._types.get(entity)
