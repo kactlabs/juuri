@@ -10,6 +10,7 @@ from .community import Community, Summary, louvain, parse_summary, split_compone
 from .community import build_prompt as community_prompt
 from .conflicts import ConflictReport, find_conflicts
 from .evaluate import Evaluation, evaluate_retrieval, tune_retrieval
+from .export import to_turtle as export_turtle
 from .paths import Chain
 from .provenance import Provenance
 from .query import QueryResult, parse_query, run_query
@@ -530,6 +531,28 @@ class TripleStore:
             used += count(entry)
             lines.append(entry)
         return "\n".join([header, *lines]) if lines else ""
+
+    def to_turtle(
+        self,
+        path: Optional[str] = None,
+        base: str = "http://example.org/juuri/",
+        include_provenance: bool = True,
+        as_of: DateLike = None,
+        include_undated: bool = True,
+    ) -> str:
+        """Export the graph as Turtle (OWL 2 vocabulary). Returns the text, and writes it to `path` if given.
+
+        Contains the schema as an ontology (classes, subclasses, relations
+        with domain and range, transitive / symmetric / inverse / implies
+        rules, functional constraints), the entities with their types and
+        labels, merged aliases as owl:sameAs, and the facts. With
+        include_provenance, each evidence record becomes an rdf:Statement
+        with its source, chunk, confidence, valid_from / valid_to and
+        recording time. as_of exports only facts valid on that day.
+        `base` is the namespace for all IRIs: an http(s) URL ending in "/".
+        The output is deterministic, so it diffs cleanly between runs.
+        """
+        return export_turtle(self, path, base, include_provenance, as_of, include_undated)
 
     def conflicts(
         self,
