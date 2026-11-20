@@ -40,3 +40,33 @@ class OllamaLLM:
         if "response" not in payload:
             raise LLMError(f"Ollama returned no 'response' field: {payload.get('error', payload)}")
         return payload["response"]
+
+
+class OllamaEmbedder:
+    """Embeds text with a local Ollama embedding model, e.g. nomic-embed-text."""
+
+    def __init__(self, model: str, host: str = "http://localhost:11434", timeout: float = 120.0) -> None:
+        if not model:
+            raise ValueError("model is required")
+        self.model = model
+        self.host = host.rstrip("/")
+        self.timeout = timeout
+
+    def embed(self, texts):
+        """Return one vector (list of floats) per input text."""
+        texts = list(texts)
+        if not texts:
+            return []
+        body = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.host}/api/embed", data=body, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise LLMError(f"Ollama embed request to {self.host} failed: {exc}") from exc
+        vectors = payload.get("embeddings")
+        if not isinstance(vectors, list) or len(vectors) != len(texts):
+            raise LLMError(f"Ollama returned unexpected embeddings: {payload.get('error', 'bad shape')}")
+        return vectors

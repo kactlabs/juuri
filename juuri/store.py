@@ -4,7 +4,10 @@ from array import array
 from datetime import datetime, timezone
 from typing import Dict, Iterator, List, Optional, Tuple
 
+from typing import Sequence
+
 from .provenance import Provenance
+from .retrieve import Hit, Hits, top_seeds
 from .schema import Schema, SchemaError
 
 Triple = Tuple[str, str, str]
@@ -57,6 +60,7 @@ class TripleStore:
         self._by_o: Dict[int, array] = {}
         self._prov: Dict[int, List[Provenance]] = {}
         self._chunks: Dict[str, str] = {}
+        self._emb: Dict[str, List[float]] = {}
 
     def __len__(self) -> int:
         return len(self._s)
@@ -112,6 +116,86 @@ class TripleStore:
         if not any(r.source == source and r.chunk_id == chunk_id and r.confidence == confidence for r in records):
             records.append(record)
         return tid
+
+    def entities(self) -> List[str]:
+        """All entity names (every term used as a subject or object)."""
+        ids = set(self._by_s) | set(self._by_o)
+        return sorted(self._terms.string(i) for i in ids)
+
+    def embed(self, embedder, batch_size: int = 64) -> int:
+        """Embed every entity that has no vector yet. Returns the number embedded."""
+        todo = [e for e in self.entities() if e not in self._emb]
+        for i in range(0, len(todo), batch_size):
+            batch = todo[i : i + batch_size]
+            for name, vec in zip(batch, embedder.embed(batch)):
+                self._emb[name] = list(vec)
+        return len(todo)
+
+    def retrieve(
+        self,
+        query: str,
+        embedder,
+        seeds: int = 3,
+        hops: int = 1,
+        expand: Optional[Sequence[str]] = None,
+        direction: str = "both",
+        min_score: float = 0.0,
+    ) -> Hits:
+        """Find seed entities by vector similarity, then expand `hops` steps.
+
+        expand: only follow these relation names (default: all).
+        direction: "out" follows subject -> object, "in" the reverse, "both" either way.
+        Seeds scoring below min_score are ignored. Call embed() first.
+        Triples are ordered by hop, then by seed score.
+        """
+        if direction not in ("out", "in", "both"):
+            raise ValueError("direction must be 'out', 'in' or 'both'")
+        if hops < 0 or seeds < 1:
+            raise ValueError("hops must be >= 0 and seeds >= 1")
+        if not self._emb:
+            raise ValueError("no embeddings: call embed() first")
+        qvec = embedder.embed([query])[0]
+        seed_list = [s for s in top_seeds(qvec, self._emb, seeds) if s[1] >= min_score]
+        allowed = None if expand is None else set(expand)
+
+        best: Dict[int, Tuple[int, float]] = {}  # triple id -> (hop, seed score)
+        for seed, score in seed_list:
+            frontier = {seed}
+            visited = {seed}
+            for hop in range(hops + 1):
+                nxt = set()
+                for ent in frontier:
+                    for tid in self._touching(ent, direction):
+                        if allowed is not None and self._terms.string(self._p[tid]) not in allowed:
+                            continue
+                        prev = best.get(tid)
+                        if prev is None or (hop, -score) < (prev[0], -prev[1]):
+                            best[tid] = (hop, score)
+                        for term in (self._s[tid], self._o[tid]):
+                            name = self._terms.string(term)
+                            if name not in visited:
+                                visited.add(name)
+                                nxt.add(name)
+                frontier = nxt
+                if not frontier:
+                    break
+        ordered = sorted(best.items(), key=lambda kv: (kv[1][0], -kv[1][1], kv[0]))
+        hits = [
+            Hit(self.get(tid), hop, score, tuple(self._prov.get(tid, [])))
+            for tid, (hop, score) in ordered
+        ]
+        return Hits(query=query, seeds=seed_list, hits=hits)
+
+    def _touching(self, entity: str, direction: str) -> List[int]:
+        term = self._terms.lookup(entity)
+        if term is None:
+            return []
+        out: List[int] = []
+        if direction in ("out", "both"):
+            out.extend(self._by_s.get(term, ()))
+        if direction in ("in", "both"):
+            out.extend(self._by_o.get(term, ()))
+        return out
 
     def provenance(self, subject: str, predicate: str, obj: str) -> List[Provenance]:
         """Return all provenance records for a triple. Empty if the triple is unknown."""
