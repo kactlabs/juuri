@@ -82,6 +82,55 @@ class Schema:
                 continue
             raise SchemaError(f"invalid rule '{rule}' for relation '{name}'")
 
+    def to_dict(self) -> Dict[str, object]:
+        """The schema as plain data (dicts and lists of strings), sorted so the output is stable."""
+        return {
+            "classes": sorted(self.classes),
+            "relations": {n: list(self.relations[n]) for n in sorted(self.relations)},
+            "rules": {n: self.rules[n] for n in sorted(self.rules)},
+            "subclasses": {n: self.subclasses[n] for n in sorted(self.subclasses)},
+            "constraints": {n: list(self.constraints[n]) for n in sorted(self.constraints)},
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "Schema":
+        """Rebuild a schema from to_dict() output. Raises SchemaError if the data is malformed."""
+        if not isinstance(data, Mapping):
+            raise SchemaError("schema data must be an object")
+        unknown = set(data) - {"classes", "relations", "rules", "subclasses", "constraints"}
+        if unknown:
+            raise SchemaError(f"unknown schema keys: {sorted(unknown)}")
+
+        def strings(value: object, label: str) -> list:
+            if not isinstance(value, (list, tuple)) or not all(isinstance(v, str) for v in value):
+                raise SchemaError(f"'{label}' must be a list of strings")
+            return list(value)
+
+        def string_map(value: object, label: str) -> Dict[str, str]:
+            if not isinstance(value, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+                raise SchemaError(f"'{label}' must map names to strings")
+            return dict(value)
+
+        relations = data.get("relations")
+        if not isinstance(relations, Mapping) or not all(
+            isinstance(k, str) and isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(x, str) for x in v)
+            for k, v in relations.items()
+        ):
+            raise SchemaError("'relations' must map names to [domain, range]")
+        constraints = data.get("constraints", {})
+        if not isinstance(constraints, Mapping) or not all(
+            isinstance(k, str) and isinstance(v, (list, tuple)) and all(isinstance(x, str) for x in v)
+            for k, v in constraints.items()
+        ):
+            raise SchemaError("'constraints' must map relation names to lists of strings")
+        return cls(
+            strings(data.get("classes"), "classes"),
+            {k: (v[0], v[1]) for k, v in relations.items()},
+            string_map(data.get("rules", {}), "rules"),
+            string_map(data.get("subclasses", {}), "subclasses"),
+            {k: list(v) for k, v in constraints.items()},
+        )
+
     def is_a(self, cls: str, ancestor: str) -> bool:
         """True if cls equals ancestor or is a (transitive) subclass of it."""
         while True:

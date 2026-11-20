@@ -28,6 +28,7 @@ v0.3: the knowledge-graph RAG loop works end to end, with temporal facts, root-c
 | Evaluate | Hit rate, coverage, precision and MRR against gold answers, plus settings tuning |
 | Conflicts | Facts that contradict each other under schema constraints, with dates considered |
 | Export | Turtle / OWL, and a one-way `networkx` graph |
+| Persist | `save()` / `load()` the whole store to one JSON file, checked on load |
 
 ## Quick start
 
@@ -231,6 +232,23 @@ for conflict in store.conflicts():     # also: as_of, include_undated, relations
 
 Two facts conflict only if their validity periods overlap, so captaining one team until 2015 and another from 2016 is fine. If either fact has no dated evidence, the conflict is reported with `undated=True`, meaning the facts may not overlap. Each side carries its provenance, and `conflict.cross_source` is true when the two sides share no source. juuri reports conflicts but does not decide which side is right. Entity names are compared as stored, so merge variants such as `Chennai` and `Chennai, India` first.
 
+**Save and load**
+
+```python
+store.save("graph.json")                    # a name ending in .gz is gzipped
+store = jr.TripleStore.load("graph.json")   # the schema comes from the file
+store.save("small.json.gz", include_embeddings=False)   # vectors are most of a large file
+```
+
+The file holds the schema, facts, provenance and dates, entity types, merged aliases, chunk text, entity vectors and cached community summaries, so a loaded store answers queries the same as the saved one. Re-ingest, merges and `ask()` keep working after a load.
+
+- It is JSON, not pickle, so loading a file cannot run code, and you can read or diff it. Output is deterministic.
+- Saving is atomic: the file is written to a temporary name and moved into place, so a failed save leaves an existing file as it was. A new file is readable by its owner only (mode 0600).
+- `load` checks the whole file before it builds a store. A damaged or hand-edited file raises `jr.PersistenceError`, as does a file written by a newer juuri. This includes facts that break the schema, an entity with the wrong type and aliases that point at nothing. Nothing is repaired or guessed. A missing file raises `FileNotFoundError`.
+- Without vectors, call `embed()` again after loading.
+- It saves the whole store each time. It does not append, and it is not safe for two processes writing the same file.
+- A saved file is plain text of your data. Anyone who can read it can read your facts and source text.
+
 **Export**
 
 ```python
@@ -242,7 +260,7 @@ The Turtle file contains the schema as an ontology (classes, subclasses, relatio
 
 ## Limitations
 
-- Everything is in memory. Nothing is saved to disk yet, including aliases, vectors and summaries.
+- The store lives in memory while you use it. `save()` and `load()` write and read the whole thing, so a big graph is slow to save and load, and there is no incremental or multi-process storage.
 - Vector search compares the query with every entity. There is no ANN index.
 - Only entities are embedded, not edges.
 - Merges and source removals rebuild the store, and `suggest_merges` compares every pair within a type, so they are slow on large graphs.

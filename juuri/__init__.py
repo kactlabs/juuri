@@ -4,6 +4,7 @@ from .evaluate import CaseResult, EvalCase, Evaluation
 from .extract import ExtractionError
 from .llm import LLMError, OllamaEmbedder, OllamaLLM
 from .paths import Chain
+from .persist import PersistenceError
 from .provenance import Provenance
 from .query import QueryError, QueryResult, Row
 from .resolve import MergeCandidate
@@ -16,5 +17,5 @@ __version__ = "0.3.2"
 
 __all__ = [
     "CaseResult", "Chain", "Claim", "Community", "Conflict", "ConflictReport", "EvalCase", "Evaluation", "ExtractionError", "Fact", "Hit", "Hits", "LLMError", "MergeCandidate", "OllamaEmbedder", "OllamaLLM",
-    "Provenance", "QueryError", "QueryResult", "Row", "Schema", "SchemaError", "Summary", "TripleStore", "Verification",
+    "PersistenceError", "Provenance", "QueryError", "QueryResult", "Row", "Schema", "SchemaError", "Summary", "TripleStore", "Verification",
 ]

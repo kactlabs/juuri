@@ -13,6 +13,7 @@ from .evaluate import Evaluation, evaluate_retrieval, tune_retrieval
 from .export import to_networkx as export_networkx
 from .export import to_turtle as export_turtle
 from .paths import Chain
+from .persist import dump, read, restore, write
 from .provenance import Provenance
 from .query import QueryResult, parse_query, run_query
 from .query import build_prompt as build_query_prompt
@@ -532,6 +533,29 @@ class TripleStore:
             used += count(entry)
             lines.append(entry)
         return "\n".join([header, *lines]) if lines else ""
+
+    def save(self, path, include_embeddings: bool = True) -> None:
+        """Save the whole store to one file, so it can be loaded later with TripleStore.load().
+
+        Saves the schema, facts, provenance and dates, entity types, merged
+        aliases, chunk text, community summaries and, unless
+        include_embeddings is False, the entity vectors. A name ending in
+        ".gz" is gzipped. The write is atomic: if saving fails, an existing
+        file is left as it was. A new file is readable by its owner only.
+        Vectors are the bulk of a large file. Without them, call embed()
+        again after loading.
+        """
+        write(path, dump(self, include_embeddings))
+
+    @classmethod
+    def load(cls, path) -> "TripleStore":
+        """Load a store saved with save(). The schema comes from the file.
+
+        Raises FileNotFoundError if the file is missing, and
+        PersistenceError if it is damaged, not a juuri file, or written by a
+        newer juuri. Nothing is guessed or repaired.
+        """
+        return restore(cls, read(path))
 
     def to_turtle(
         self,
