@@ -3,6 +3,8 @@
 from array import array
 from typing import Dict, Iterator, Optional, Tuple
 
+from .schema import Schema, SchemaError
+
 Triple = Tuple[str, str, str]
 
 
@@ -40,7 +42,9 @@ class TripleStore:
     the triples that use it, so lookups are fast in any direction.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, schema: Optional[Schema] = None) -> None:
+        self.schema = schema
+        self._types: Dict[str, str] = {}
         self._terms = Interner()
         self._s = array("I")
         self._p = array("I")
@@ -53,11 +57,28 @@ class TripleStore:
     def __len__(self) -> int:
         return len(self._s)
 
-    def add(self, subject: str, predicate: str, obj: str) -> int:
-        """Add a triple and return its ID. Duplicates return the existing ID."""
+    def add(
+        self,
+        subject: str,
+        predicate: str,
+        obj: str,
+        subject_type: Optional[str] = None,
+        object_type: Optional[str] = None,
+    ) -> int:
+        """Add a triple and return its ID. Duplicates return the existing ID.
+
+        With a schema, the relation and entity types are checked first.
+        An entity's type is remembered after its first use.
+        """
         for name, value in (("subject", subject), ("predicate", predicate), ("object", obj)):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
+        if self.schema is not None:
+            st = self._resolve_type(subject, subject_type)
+            ot = self._resolve_type(obj, object_type)
+            self.schema.check(st, predicate, ot)
+            self._types[subject] = st
+            self._types[obj] = ot
         s = self._terms.intern(subject)
         p = self._terms.intern(predicate)
         o = self._terms.intern(obj)
@@ -72,6 +93,15 @@ class TripleStore:
         for index, term in ((self._by_s, s), (self._by_p, p), (self._by_o, o)):
             index.setdefault(term, array("I")).append(tid)
         return tid
+
+    def _resolve_type(self, entity: str, given: Optional[str]) -> Optional[str]:
+        known = self._types.get(entity)
+        if given is not None and known is not None and given != known:
+            raise SchemaError(f"'{entity}' is already typed '{known}', got '{given}'")
+        return given if given is not None else known
+
+    def type_of(self, entity: str) -> Optional[str]:
+        return self._types.get(entity)
 
     def _find_id(self, s: int, p: int, o: int) -> int:
         for tid in self._by_s[s]:
