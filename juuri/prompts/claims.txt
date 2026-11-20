@@ -1,0 +1,16 @@
+You list the factual claims made in an answer, as triples.
+
+Allowed relations (NAME: SubjectClass -> ObjectClass):
+{relations}
+
+Rules:
+- Write each claim as subject, predicate, object.
+- Use a relation name from the list above whenever the claim fits one. Use the exact name.
+- If a claim does not fit any listed relation, still list it and use a short UPPER_SNAKE_CASE predicate of your own.
+- Use the entity names exactly as written in the answer.
+- Include only claims the answer states. Do not add facts of your own.
+- Reply with JSON only, in this shape: {{"claims": [{{"subject": "...", "predicate": "...", "object": "..."}}]}}
+- If the answer makes no factual claims, reply with {{"claims": []}}.
+
+Answer:
+{answer}

@@ -1,14 +1,16 @@
 """Compact triple store: interned strings, columnar triples, S/P/O indexes."""
 
 from array import array
+from collections import deque
 from datetime import datetime, timezone
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
-from typing import Sequence
-
+from .paths import Chain
 from .provenance import Provenance
 from .retrieve import Hit, Hits, top_seeds
 from .schema import Schema, SchemaError
+from .verify import Verification
+from .verify import verify as verify_answer
 
 Triple = Tuple[str, str, str]
 
@@ -37,6 +39,13 @@ class Interner:
 
     def __len__(self) -> int:
         return len(self._to_str)
+
+
+def _check_walk(direction: str, max_hops: int) -> None:
+    if direction not in ("out", "in", "both"):
+        raise ValueError("direction must be 'out', 'in' or 'both'")
+    if max_hops < 1:
+        raise ValueError("max_hops must be >= 1")
 
 
 class TripleStore:
@@ -116,6 +125,122 @@ class TripleStore:
         if not any(r.source == source and r.chunk_id == chunk_id and r.confidence == confidence for r in records):
             records.append(record)
         return tid
+
+    def _steps(self, entity: str, predicates, direction: str) -> List[Tuple[int, str]]:
+        """Edges leaving `entity` as (triple id, entity reached), in insertion order."""
+        out: List[Tuple[int, str]] = []
+        for tid in self._touching(entity, "out" if direction == "both" else direction):
+            if predicates is None or self._terms.string(self._p[tid]) in predicates:
+                end = self._o[tid] if direction in ("out", "both") else self._s[tid]
+                out.append((tid, self._terms.string(end)))
+        if direction == "both":
+            for tid in self._touching(entity, "in"):
+                if predicates is None or self._terms.string(self._p[tid]) in predicates:
+                    out.append((tid, self._terms.string(self._s[tid])))
+        return out
+
+    def _chain(self, start: str, end: str, tids: List[int], cyclic: bool = False, truncated: bool = False) -> Chain:
+        return Chain(
+            start=start,
+            end=end,
+            triples=tuple(self.get(t) for t in tids),
+            provenance=tuple(tuple(self._prov.get(t, ())) for t in tids),
+            cyclic=cyclic,
+            truncated=truncated,
+        )
+
+    def paths(
+        self,
+        source: str,
+        target: str,
+        max_hops: int = 4,
+        predicates: Optional[Sequence[str]] = None,
+        direction: str = "out",
+        limit: int = 10,
+    ) -> List[Chain]:
+        """Find simple paths (no repeated entity) from source to target, shortest first.
+
+        predicates: only follow these relation names (default: all).
+        direction: "out" follows subject -> object, "in" the reverse, "both" either way.
+        Returns at most `limit` chains. Empty if there is no path.
+        """
+        _check_walk(direction, max_hops)
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if source == target:
+            raise ValueError("source and target must differ")
+        allowed = None if predicates is None else set(predicates)
+        results: List[Chain] = []
+        queue = deque([(source, [], {source})])
+        while queue:
+            node, tids, visited = queue.popleft()
+            if len(tids) >= max_hops:
+                continue
+            for tid, other in self._steps(node, allowed, direction):
+                if other in visited:
+                    continue
+                if other == target:
+                    results.append(self._chain(source, target, tids + [tid]))
+                    if len(results) >= limit:
+                        return results
+                else:
+                    queue.append((other, tids + [tid], visited | {other}))
+        return results
+
+    def chains(self, entity: str, relation: str, direction: str = "out", max_hops: int = 10) -> List[Chain]:
+        """Follow `relation` from `entity` until each branch ends.
+
+        Returns one Chain per branch. A branch ends when no edge continues
+        (the end entity), when it would revisit an entity (cyclic=True) or
+        when max_hops is reached (truncated=True). A known entity with no
+        matching edge gives one empty chain. An unknown entity gives [].
+        """
+        _check_walk(direction, max_hops)
+        term = self._terms.lookup(entity)
+        if term is None or (term not in self._by_s and term not in self._by_o):
+            return []
+        results: List[Chain] = []
+        stack = [(entity, [], {entity})]
+        while stack:
+            node, tids, visited = stack.pop()
+            nxt = self._steps(node, {relation}, direction)
+            if not nxt:
+                results.append(self._chain(entity, node, tids))
+            elif len(tids) >= max_hops:
+                results.append(self._chain(entity, node, tids, truncated=True))
+            else:
+                fresh = []
+                for tid, other in nxt:
+                    if other in visited:
+                        results.append(self._chain(entity, other, tids + [tid], cyclic=True))
+                    else:
+                        fresh.append((other, tids + [tid], visited | {other}))
+                stack.extend(reversed(fresh))
+        return results
+
+    def root_cause(self, entity: str, relation: str = "CAUSED_BY", max_hops: int = 10) -> List[Chain]:
+        """Follow `relation` (subject -> object) from `entity` to the end of each branch.
+
+        With CAUSED_BY, "A CAUSED_BY B" means B is a cause of A, so each
+        chain ends at a root cause.
+        """
+        return self.chains(entity, relation, "out", max_hops)
+
+    def blast_radius(self, entity: str, relation: str = "CAUSED_BY", max_hops: int = 10) -> List[Chain]:
+        """Follow `relation` backwards from `entity`: what it led to, branch by branch."""
+        return self.chains(entity, relation, "in", max_hops)
+
+    def verify(self, answer: str, hits: Hits, llm) -> Verification:
+        """Check an LLM answer against retrieved hits. Requires a schema.
+
+        The LLM lists the answer's claims. Each claim is supported if a hit
+        backs it (directly or by a symmetric, inverse or implies rule),
+        unsupported if it uses a declared relation but nothing backs it,
+        and unchecked if it uses an undeclared relation.
+        """
+        if self.schema is None:
+            raise SchemaError("verify requires a schema")
+        return verify_answer(answer, hits, llm, self.schema)
 
     def entities(self) -> List[str]:
         """All entity names (every term used as a subject or object)."""
