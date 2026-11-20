@@ -1,8 +1,10 @@
 """Compact triple store: interned strings, columnar triples, S/P/O indexes."""
 
 from array import array
-from typing import Dict, Iterator, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, Iterator, List, Optional, Tuple
 
+from .provenance import Provenance
 from .schema import Schema, SchemaError
 
 Triple = Tuple[str, str, str]
@@ -53,6 +55,8 @@ class TripleStore:
         self._by_s: Dict[int, array] = {}
         self._by_p: Dict[int, array] = {}
         self._by_o: Dict[int, array] = {}
+        self._prov: Dict[int, List[Provenance]] = {}
+        self._chunks: Dict[str, str] = {}
 
     def __len__(self) -> int:
         return len(self._s)
@@ -64,12 +68,21 @@ class TripleStore:
         obj: str,
         subject_type: Optional[str] = None,
         object_type: Optional[str] = None,
+        source: Optional[str] = None,
+        chunk_id: Optional[str] = None,
+        confidence: Optional[float] = None,
+        timestamp: Optional[str] = None,
     ) -> int:
         """Add a triple and return its ID. Duplicates return the existing ID.
 
         With a schema, the relation and entity types are checked first.
         An entity's type is remembered after its first use.
+        Every call records a Provenance entry for the triple (timestamp
+        defaults to now, UTC). Repeating a fact from a new source adds
+        another entry. An identical entry is not stored twice.
         """
+        if confidence is not None and not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
         for name, value in (("subject", subject), ("predicate", predicate), ("object", obj)):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
@@ -84,15 +97,66 @@ class TripleStore:
         o = self._terms.intern(obj)
         key = (s, p, o)
         if key in self._seen:
-            return self._find_id(s, p, o)
-        tid = len(self._s)
-        self._seen.add(key)
-        self._s.append(s)
-        self._p.append(p)
-        self._o.append(o)
-        for index, term in ((self._by_s, s), (self._by_p, p), (self._by_o, o)):
-            index.setdefault(term, array("I")).append(tid)
+            tid = self._find_id(s, p, o)
+        else:
+            tid = len(self._s)
+            self._seen.add(key)
+            self._s.append(s)
+            self._p.append(p)
+            self._o.append(o)
+            for index, term in ((self._by_s, s), (self._by_p, p), (self._by_o, o)):
+                index.setdefault(term, array("I")).append(tid)
+        ts = timestamp or datetime.now(timezone.utc).isoformat()
+        record = Provenance(source, chunk_id, confidence, ts)
+        records = self._prov.setdefault(tid, [])
+        if not any(r.source == source and r.chunk_id == chunk_id and r.confidence == confidence for r in records):
+            records.append(record)
         return tid
+
+    def provenance(self, subject: str, predicate: str, obj: str) -> List[Provenance]:
+        """Return all provenance records for a triple. Empty if the triple is unknown."""
+        ids = list(self._candidates(subject, predicate, obj))
+        return list(self._prov.get(ids[0], [])) if ids else []
+
+    def chunk_text(self, chunk_id: str) -> Optional[str]:
+        """Return the text of an ingested chunk, or None if unknown."""
+        return self._chunks.get(chunk_id)
+
+    def ingest(self, docs, llm, max_chars: int = 2000, min_confidence: float = 0.0, source: Optional[str] = None) -> int:
+        """Extract triples from text with an LLM and add them. Returns the count of new triples.
+
+        docs is a string, a list of strings, or a dict {source_name: text}.
+        For a string or list, `source` names the document (None if not given).
+        Each fact records its source, chunk ID ("<source>#<n>"), confidence
+        and timestamp. Requires a schema. Triples that fail the schema or
+        fall below min_confidence are skipped.
+        """
+        from .extract import extract_triples
+
+        if self.schema is None:
+            raise SchemaError("ingest requires a schema")
+        if isinstance(docs, str):
+            docs = [(source, docs)]
+        elif isinstance(docs, dict):
+            docs = list(docs.items())
+        else:
+            docs = [(source, d) for d in docs]
+        before = len(self)
+        for name, doc in docs:
+            for t in extract_triples(doc, self.schema, llm, max_chars):
+                if t["confidence"] < min_confidence:
+                    continue
+                chunk_id = f"{name}#{t['chunk_index']}" if name else f"#{t['chunk_index']}"
+                try:
+                    self.add(
+                        t["subject"], t["predicate"], t["object"],
+                        t["subject_type"], t["object_type"],
+                        source=name, chunk_id=chunk_id, confidence=t["confidence"],
+                    )
+                except SchemaError:
+                    continue  # e.g. entity already typed differently
+                self._chunks.setdefault(chunk_id, t["chunk"])
+        return len(self) - before
 
     def _resolve_type(self, entity: str, given: Optional[str]) -> Optional[str]:
         known = self._types.get(entity)

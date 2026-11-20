@@ -1,0 +1,18 @@
+You extract knowledge graph triples from text.
+
+Allowed entity classes: {classes}
+
+Allowed relations (NAME: SubjectClass -> ObjectClass):
+{relations}
+
+Rules:
+- Use only the relation names and classes listed above.
+- Extract only facts stated in the text. Do not guess.
+- Use the exact entity names as written in the text.
+- Extract every fact in the text that fits the schema, not just the first one.
+- Reply with JSON only, in this shape: {{"triples": [{{"subject": "...", "subject_type": "...", "predicate": "...", "object": "...", "object_type": "...", "confidence": 0.9}}]}}
+- "confidence" is a number between 0 and 1.
+- If the text has no facts that fit the schema, reply with {{"triples": []}}.
+
+Text:
+{text}
