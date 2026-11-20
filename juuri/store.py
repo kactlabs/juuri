@@ -8,6 +8,7 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .community import Community, Summary, louvain, parse_summary, split_components
 from .community import build_prompt as community_prompt
+from .evaluate import Evaluation, evaluate_retrieval, tune_retrieval
 from .paths import Chain
 from .provenance import Provenance
 from .query import QueryResult, parse_query, run_query
@@ -528,6 +529,18 @@ class TripleStore:
             used += count(entry)
             lines.append(entry)
         return "\n".join([header, *lines]) if lines else ""
+
+    def evaluate(self, embedder, cases, tokens: int = 2000, count_tokens=None, **retrieve_args) -> Evaluation:
+        """Score retrieval against gold cases. See juuri.evaluate for the case format.
+
+        retrieve_args (seeds, hops, expand, direction, min_score) are passed to retrieve().
+        Call embed() first.
+        """
+        return evaluate_retrieval(self, embedder, cases, tokens, count_tokens, **retrieve_args)
+
+    def tune(self, embedder, cases, grid, tokens: int = 2000, count_tokens=None) -> List[Evaluation]:
+        """Try every combination of retrieval settings in `grid`. Returns evaluations, best first."""
+        return tune_retrieval(self, embedder, cases, grid, tokens, count_tokens)
 
     def query(self, spec) -> QueryResult:
         """Run a structured query (a dict or JSON string). See juuri.query for the format.
