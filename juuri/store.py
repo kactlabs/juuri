@@ -10,6 +10,7 @@ from .community import Community, Summary, louvain, parse_summary, split_compone
 from .community import build_prompt as community_prompt
 from .conflicts import ConflictReport, find_conflicts
 from .evaluate import Evaluation, evaluate_retrieval, tune_retrieval
+from .export import to_networkx as export_networkx
 from .export import to_turtle as export_turtle
 from .paths import Chain
 from .provenance import Provenance
@@ -553,6 +554,20 @@ class TripleStore:
         The output is deterministic, so it diffs cleanly between runs.
         """
         return export_turtle(self, path, base, include_provenance, as_of, include_undated)
+
+    def to_networkx(self, as_of: DateLike = None, include_undated: bool = True):
+        """Export the graph as a networkx.MultiDiGraph (one-way: nothing is read back).
+
+        Needs networkx (pip install networkx). Each entity is a node with
+        `type` (None without a schema) and `aliases`. Each fact is an edge
+        from subject to object, with the predicate as the edge key and these
+        attributes: predicate, sources, chunks, confidence (the highest
+        recorded, or None), periods (distinct (valid_from, valid_to) pairs)
+        and provenance (the full Provenance records).
+        as_of keeps only facts valid on that day, as in find().
+        The graph is a copy. Changing it does not change the store.
+        """
+        return export_networkx(self, as_of, include_undated)
 
     def conflicts(
         self,

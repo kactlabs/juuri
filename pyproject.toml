@@ -9,6 +9,9 @@ description = "juuri placeholder package"
 readme = "README.md"
 requires-python = ">=3.8"
 
+[project.optional-dependencies]
+networkx = ["networkx"]
+
 [tool.setuptools]
 packages = ["juuri"]
 

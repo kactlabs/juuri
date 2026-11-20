@@ -177,3 +177,32 @@ def to_turtle(
     if path is not None:
         Path(path).write_text(text, encoding="utf-8")
     return text
+
+
+def to_networkx(store, as_of: DateLike = None, include_undated: bool = True):
+    """Export the store as a networkx.MultiDiGraph. See TripleStore.to_networkx()."""
+    try:
+        import networkx as nx
+    except ImportError as exc:
+        raise ImportError("to_networkx() needs networkx: pip install networkx") from exc
+
+    graph = nx.MultiDiGraph()
+    for s, p, o in sorted(store.find(as_of=as_of, include_undated=include_undated)):
+        records = store.provenance(s, p, o)
+        confidences = [r.confidence for r in records if r.confidence is not None]
+        for name in (s, o):
+            if name not in graph:
+                graph.add_node(name, type=store.type_of(name), aliases=store.aliases(name))
+        graph.add_edge(
+            s, o, key=p,
+            predicate=p,
+            sources=sorted({r.source for r in records if r.source}),
+            chunks=sorted({r.chunk_id for r in records if r.chunk_id}),
+            confidence=max(confidences) if confidences else None,
+            periods=sorted(
+                {(r.valid_from, r.valid_to) for r in records if r.valid_from or r.valid_to},
+                key=lambda period: (period[0] or "", period[1] or "9999-12-31"),
+            ),
+            provenance=tuple(records),
+        )
+    return graph
