@@ -3,13 +3,15 @@
 import hashlib
 from array import array
 from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .community import Community, Summary, louvain, parse_summary, split_components
 from .community import build_prompt as community_prompt
 from .paths import Chain
 from .provenance import Provenance
+from .query import QueryResult, parse_query, run_query
+from .query import build_prompt as build_query_prompt
 from .resolve import MergeCandidate, name_score
 from .retrieve import Fact, Hit, Hits, cosine, estimate_tokens, top_seeds
 from .retrieve import _refs, _validity_note
@@ -526,6 +528,29 @@ class TripleStore:
             used += count(entry)
             lines.append(entry)
         return "\n".join([header, *lines]) if lines else ""
+
+    def query(self, spec) -> QueryResult:
+        """Run a structured query (a dict or JSON string). See juuri.query for the format.
+
+        Entity names are linked to graph entities. An unknown or ambiguous
+        name raises QueryError, as does a malformed query or an undeclared relation.
+        """
+        return run_query(self, spec)
+
+    def ask(self, question: str, llm, today: Optional[str] = None) -> QueryResult:
+        """Turn a question into a structured query with the LLM and run it. Requires a schema.
+
+        `today` ("YYYY-MM-DD") lets the LLM resolve relative dates and
+        defaults to the current date. The query that ran is in result.query.
+        Raises QueryError if the LLM output is not a valid query.
+        """
+        if self.schema is None:
+            raise SchemaError("ask requires a schema")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("question must be a non-empty string")
+        day = parse_as_of(today) if today else date.today().isoformat()
+        raw = llm.complete(build_query_prompt(question.strip(), self.schema, day))
+        return run_query(self, parse_query(raw))
 
     def entities(self) -> List[str]:
         """All entity names (every term used as a subject or object)."""
