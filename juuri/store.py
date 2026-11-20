@@ -7,7 +7,8 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .paths import Chain
 from .provenance import Provenance
-from .retrieve import Hit, Hits, top_seeds
+from .resolve import MergeCandidate, name_score
+from .retrieve import Hit, Hits, cosine, top_seeds
 from .schema import Schema, SchemaError
 from .verify import Verification
 from .verify import verify as verify_answer
@@ -70,6 +71,8 @@ class TripleStore:
         self._prov: Dict[int, List[Provenance]] = {}
         self._chunks: Dict[str, str] = {}
         self._emb: Dict[str, List[float]] = {}
+        # normalised alias -> (alias as given, canonical name)
+        self._aliases: Dict[str, Tuple[str, str]] = {}
 
     def __len__(self) -> int:
         return len(self._s)
@@ -99,26 +102,14 @@ class TripleStore:
         for name, value in (("subject", subject), ("predicate", predicate), ("object", obj)):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
+        subject, obj = self.canonical(subject), self.canonical(obj)
         if self.schema is not None:
             st = self._resolve_type(subject, subject_type)
             ot = self._resolve_type(obj, object_type)
             self.schema.check(st, predicate, ot)
             self._types[subject] = st
             self._types[obj] = ot
-        s = self._terms.intern(subject)
-        p = self._terms.intern(predicate)
-        o = self._terms.intern(obj)
-        key = (s, p, o)
-        if key in self._seen:
-            tid = self._find_id(s, p, o)
-        else:
-            tid = len(self._s)
-            self._seen.add(key)
-            self._s.append(s)
-            self._p.append(p)
-            self._o.append(o)
-            for index, term in ((self._by_s, s), (self._by_p, p), (self._by_o, o)):
-                index.setdefault(term, array("I")).append(tid)
+        tid = self._insert(subject, predicate, obj)
         ts = timestamp or datetime.now(timezone.utc).isoformat()
         record = Provenance(source, chunk_id, confidence, ts)
         records = self._prov.setdefault(tid, [])
@@ -167,6 +158,7 @@ class TripleStore:
         _check_walk(direction, max_hops)
         if limit < 1:
             raise ValueError("limit must be >= 1")
+        source, target = self.canonical(source), self.canonical(target)
         if source == target:
             raise ValueError("source and target must differ")
         allowed = None if predicates is None else set(predicates)
@@ -196,6 +188,7 @@ class TripleStore:
         matching edge gives one empty chain. An unknown entity gives [].
         """
         _check_walk(direction, max_hops)
+        entity = self.canonical(entity)
         term = self._terms.lookup(entity)
         if term is None or (term not in self._by_s and term not in self._by_o):
             return []
@@ -240,7 +233,141 @@ class TripleStore:
         """
         if self.schema is None:
             raise SchemaError("verify requires a schema")
-        return verify_answer(answer, hits, llm, self.schema)
+        return verify_answer(answer, hits, llm, self.schema, canon=self.canonical)
+
+    def _insert(self, subject: str, predicate: str, obj: str) -> int:
+        """Add the triple's columns and index entries, or return the existing ID."""
+        s = self._terms.intern(subject)
+        p = self._terms.intern(predicate)
+        o = self._terms.intern(obj)
+        if (s, p, o) in self._seen:
+            return self._find_id(s, p, o)
+        tid = len(self._s)
+        self._seen.add((s, p, o))
+        self._s.append(s)
+        self._p.append(p)
+        self._o.append(o)
+        for index, term in ((self._by_s, s), (self._by_p, p), (self._by_o, o)):
+            index.setdefault(term, array("I")).append(tid)
+        return tid
+
+    def canonical(self, name: str) -> str:
+        """Return the entity name that `name` was merged into, or `name` itself.
+
+        Alias lookup ignores case and extra spacing.
+        """
+        record = self._aliases.get(" ".join(name.split()).casefold())
+        return record[1] if record else name
+
+    def aliases(self, entity: str) -> List[str]:
+        """Names that were merged into `entity`."""
+        entity = self.canonical(entity)
+        return sorted(a for a, target in self._aliases.values() if target == entity)
+
+    def merge(self, alias: str, canonical: str) -> int:
+        """Merge entity `alias` into `canonical` (a sameAs link). Returns triples that collapsed.
+
+        Triples about `alias` are rewritten to use `canonical`. Duplicates
+        merge and keep every provenance record. Later adds, lookups and
+        traversals using the alias name resolve to `canonical`. Raises
+        SchemaError if the two entities have different types.
+        """
+        for label, value in (("alias", alias), ("canonical", canonical)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{label} must be a non-empty string")
+        old = self.canonical(alias)
+        new = self.canonical(canonical)
+        if old == new:
+            return 0
+        t_old, t_new = self._types.get(old), self._types.get(new)
+        if t_old and t_new and t_old != t_new:
+            raise SchemaError(f"cannot merge '{old}' ({t_old}) into '{new}' ({t_new})")
+        for key, (orig, target) in list(self._aliases.items()):
+            if target == old:
+                self._aliases[key] = (orig, new)
+        for name in {alias, old}:
+            self._aliases[" ".join(name.split()).casefold()] = (name, new)
+        if t_old and not t_new:
+            self._types[new] = t_old
+        self._types.pop(old, None)
+        self._emb.pop(old, None)
+        before = len(self)
+        self._rebuild({old: new})
+        return before - len(self)
+
+    def _rebuild(self, mapping: Dict[str, str]) -> None:
+        """Re-insert every triple with entity names replaced per `mapping`."""
+        old = [(self.get(t), self._prov.get(t, [])) for t in range(len(self._s))]
+        self._terms = Interner()
+        self._s, self._p, self._o = array("I"), array("I"), array("I")
+        self._seen = set()
+        self._by_s, self._by_p, self._by_o = {}, {}, {}
+        self._prov = {}
+        for (s, p, o), records in old:
+            tid = self._insert(mapping.get(s, s), p, mapping.get(o, o))
+            kept = self._prov.setdefault(tid, [])
+            for r in records:
+                if not any(k.source == r.source and k.chunk_id == r.chunk_id and k.confidence == r.confidence for k in kept):
+                    kept.append(r)
+
+    def suggest_merges(self, threshold: float = 0.85, min_embedding: Optional[float] = None) -> List[MergeCandidate]:
+        """Suggest entity pairs that may be the same thing. Nothing is merged.
+
+        Only entities of the same type are compared. Pairs are suggested if
+        their names match after normalising, one name's words are all in the
+        other (e.g. "Dhoni" and "MS Dhoni"), or their spelling similarity is
+        at least `threshold`. If `min_embedding` is set, pairs whose stored
+        vectors have cosine similarity at or above it are suggested too.
+        Embedding-only matches are unreliable for short names, so review them.
+        Compares every pair within a type, so it is slow on very large graphs.
+        Best matches come first.
+        """
+        by_type: Dict[Optional[str], List[str]] = {}
+        for name in self.entities():
+            by_type.setdefault(self._types.get(name), []).append(name)
+        found: List[MergeCandidate] = []
+        for names in by_type.values():
+            for i, a in enumerate(names):
+                for b in names[i + 1 :]:
+                    result = name_score(a, b, threshold)
+                    if min_embedding is not None and a in self._emb and b in self._emb:
+                        sim = cosine(self._emb[a], self._emb[b])
+                        if sim >= min_embedding and (result is None or sim > result[0]):
+                            result = (sim, "similar embedding")
+                    if result is None:
+                        continue
+                    keep, other = self._pick_keep(a, b)
+                    found.append(MergeCandidate(keep, other, result[0], result[1]))
+        found.sort(key=lambda c: (-c.score, c.keep, c.merge))
+        return found
+
+    def _pick_keep(self, a: str, b: str) -> Tuple[str, str]:
+        def rank(name: str):
+            return (-len(self._touching(name, "both")), -len(name), name)
+
+        keep, other = sorted((a, b), key=rank)
+        return keep, other
+
+    def resolve_entities(self, min_score: float = 1.0, **suggest_args) -> List[MergeCandidate]:
+        """Merge every suggested pair scoring at least `min_score`. Returns the merges made.
+
+        The default of 1.0 only merges names that are identical after
+        normalising case, spacing and punctuation. Lower it with care:
+        "Dhoni" and "MS Dhoni" score 0.9, but short names can match several
+        different entities. Use suggest_merges() to review first.
+        Pairs that would merge entities of different types are skipped.
+        """
+        done: List[MergeCandidate] = []
+        for cand in self.suggest_merges(**suggest_args):
+            if cand.score < min_score:
+                break
+            try:
+                if self.canonical(cand.merge) != self.canonical(cand.keep):
+                    self.merge(cand.merge, cand.keep)
+                    done.append(cand)
+            except SchemaError:
+                continue
+        return done
 
     def entities(self) -> List[str]:
         """All entity names (every term used as a subject or object)."""
@@ -403,6 +530,8 @@ class TripleStore:
             yield self.get(tid)
 
     def _candidates(self, subject, predicate, obj) -> Iterator[int]:
+        subject = None if subject is None else self.canonical(subject)
+        obj = None if obj is None else self.canonical(obj)
         constraints = []
         for value, index, column in (
             (subject, self._by_s, self._s),

@@ -109,7 +109,7 @@ def _match(claim, hit_triple, schema: Schema) -> Optional[str]:
     return None
 
 
-def verify(answer: str, hits: Hits, llm, schema: Schema) -> Verification:
+def verify(answer: str, hits: Hits, llm, schema: Schema, canon=None) -> Verification:
     """Extract claims from `answer` with `llm` and check each against `hits`.
 
     Raises ExtractionError if the LLM output cannot be parsed, so a failed
@@ -128,7 +128,7 @@ def verify(answer: str, hits: Hits, llm, schema: Schema) -> Verification:
             continue
         found = None
         for hit in hits:
-            via = _match((s, p, o), hit.triple, schema)
+            via = _match((canon(s) if canon else s, p, canon(o) if canon else o), hit.triple, schema)
             if via is not None:
                 found = (hit, via)
                 if via == "exact":
