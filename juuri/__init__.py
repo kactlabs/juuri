@@ -5,7 +5,7 @@ from .retrieve import Hit, Hits
 from .schema import Schema, SchemaError
 from .store import TripleStore
 
-__version__ = "0.0.2"
+__version__ = "0.1.0"
 
 __all__ = [
     "ExtractionError", "Hit", "Hits", "LLMError", "OllamaEmbedder", "OllamaLLM",

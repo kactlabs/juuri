@@ -184,7 +184,13 @@ class TripleStore:
             Hit(self.get(tid), hop, score, tuple(self._prov.get(tid, [])))
             for tid, (hop, score) in ordered
         ]
-        return Hits(query=query, seeds=seed_list, hits=hits)
+        chunks = {
+            p.chunk_id: self._chunks[p.chunk_id]
+            for h in hits
+            for p in h.provenance
+            if p.chunk_id in self._chunks
+        }
+        return Hits(query=query, seeds=seed_list, hits=hits, chunks=chunks)
 
     def _touching(self, entity: str, direction: str) -> List[int]:
         term = self._terms.lookup(entity)
