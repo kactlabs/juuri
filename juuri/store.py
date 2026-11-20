@@ -1,15 +1,18 @@
 """Compact triple store: interned strings, columnar triples, S/P/O indexes."""
 
+import hashlib
 from array import array
 from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
+from .community import Community, Summary, louvain, parse_summary, split_components
+from .community import build_prompt as community_prompt
 from .paths import Chain
 from .provenance import Provenance
-from .retrieve import Fact
 from .resolve import MergeCandidate, name_score
-from .retrieve import Hit, Hits, cosine, top_seeds
+from .retrieve import Fact, Hit, Hits, cosine, estimate_tokens, top_seeds
+from .retrieve import _refs, _validity_note
 from .schema import Schema, SchemaError
 from .temporal import DateLike, covers, parse_as_of, parse_date
 from .verify import Verification
@@ -74,6 +77,8 @@ class TripleStore:
         self._chunks: Dict[str, str] = {}
         self._chunk_source: Dict[str, str] = {}
         self._emb: Dict[str, List[float]] = {}
+        self._summaries: Dict[str, str] = {}
+        self._summary_emb: Dict[str, List[float]] = {}
         # normalised alias -> (alias as given, canonical name)
         self._aliases: Dict[str, Tuple[str, str]] = {}
 
@@ -409,6 +414,118 @@ class TripleStore:
             except SchemaError:
                 continue
         return done
+
+    def communities(
+        self,
+        min_size: int = 2,
+        resolution: float = 1.0,
+        as_of: DateLike = None,
+        include_undated: bool = True,
+    ) -> List[Community]:
+        """Group entities that are densely linked (Louvain, plus a connectivity split).
+
+        Direction and relation names are ignored. Several facts between the
+        same two entities add weight. Groups smaller than min_size are left
+        out. resolution above 1 gives more, smaller groups. With as_of, only
+        facts valid on that day are used. Largest groups come first. This is
+        one flat level, not a hierarchy.
+        """
+        if min_size < 1:
+            raise ValueError("min_size must be >= 1")
+        day = None if as_of is None else parse_as_of(as_of)
+        adj: Dict[str, Dict[str, float]] = {}
+        kept: List[Triple] = []
+        for tid in range(len(self._s)):
+            if day is not None and not covers(self._prov.get(tid, ()), day, include_undated):
+                continue
+            s, p, o = self.get(tid)
+            kept.append((s, p, o))
+            adj.setdefault(s, {})
+            adj.setdefault(o, {})
+            if s != o:
+                adj[s][o] = adj[s].get(o, 0.0) + 1.0
+                adj[o][s] = adj[o].get(s, 0.0) + 1.0
+        groups = split_components(louvain(adj, resolution), adj)
+        groups = [g for g in groups if len(g) >= min_size]
+        groups.sort(key=lambda g: (-len(g), min(g)))
+        out: List[Community] = []
+        for i, group in enumerate(groups):
+            facts = tuple(sorted(t for t in kept if t[0] in group and t[2] in group))
+            out.append(Community(f"c{i}", frozenset(group), facts))
+        return out
+
+    def summarize_communities(
+        self,
+        llm,
+        communities: Optional[Sequence[Community]] = None,
+        max_facts: int = 60,
+        **community_args,
+    ) -> List[Summary]:
+        """Ask the LLM for a short cited summary of each community.
+
+        Summaries are cached by the exact facts (and their sources and dates)
+        they cover, so an unchanged community is not sent to the LLM again.
+        Each prompt holds at most `max_facts` facts, so a bigger community is
+        summarised from its first facts only. See Summary.facts_used.
+        Invalid LLM output raises ExtractionError.
+        """
+        if max_facts < 1:
+            raise ValueError("max_facts must be >= 1")
+        if communities is None:
+            communities = self.communities(**community_args)
+        out: List[Summary] = []
+        for comm in communities:
+            lines = []
+            for s, p, o in comm.triples[:max_facts]:
+                prov = tuple(self._prov.get(next(self._candidates(s, p, o)), ()))
+                lines.append(f"- {s} {p} {o}{_validity_note(prov)} [{', '.join(_refs(Hit((s, p, o), 0, 0.0, prov)))}]")
+            signature = hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()
+            text = self._summaries.get(signature)
+            if text is None:
+                text = parse_summary(llm.complete(community_prompt(lines)))
+                self._summaries[signature] = text
+            out.append(Summary(comm, text, len(lines), len(comm.triples), signature))
+        return out
+
+    def global_context(
+        self,
+        query: str,
+        embedder,
+        llm,
+        k: int = 3,
+        tokens: int = 2000,
+        count_tokens=None,
+        **community_args,
+    ) -> str:
+        """Context for broad questions: the k community summaries closest to the query.
+
+        Summarises communities (cached), embeds the summaries, and packs the
+        best matches within the token budget. Returns "" if there are no
+        communities. community_args go to communities() (min_size, resolution, as_of).
+        """
+        if k < 1 or tokens < 1:
+            raise ValueError("k and tokens must be >= 1")
+        summaries = self.summarize_communities(llm, **community_args)
+        if not summaries:
+            return ""
+        todo = [s for s in summaries if s.signature not in self._summary_emb]
+        if todo:
+            for s, vec in zip(todo, embedder.embed([s.text for s in todo])):
+                self._summary_emb[s.signature] = list(vec)
+        qvec = embedder.embed([query])[0]
+        ranked = sorted(summaries, key=lambda s: (-cosine(qvec, self._summary_emb[s.signature]), s.community.id))
+        count = count_tokens or estimate_tokens
+        header = "COMMUNITY SUMMARIES:"
+        used = count(header)
+        lines: List[str] = []
+        for s in ranked[:k]:
+            note = "" if s.facts_used == s.facts_total else f" (covers {s.facts_used} of {s.facts_total} facts)"
+            entry = f"[{s.community.id}] {s.text}{note}"
+            if used + count(entry) > tokens:
+                continue
+            used += count(entry)
+            lines.append(entry)
+        return "\n".join([header, *lines]) if lines else ""
 
     def entities(self) -> List[str]:
         """All entity names (every term used as a subject or object)."""

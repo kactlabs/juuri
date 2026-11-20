@@ -1,3 +1,4 @@
+from .community import Community, Summary
 from .extract import ExtractionError
 from .llm import LLMError, OllamaEmbedder, OllamaLLM
 from .paths import Chain
@@ -11,6 +12,6 @@ from .verify import Claim, Verification
 __version__ = "0.2.0"
 
 __all__ = [
-    "Chain", "Claim", "ExtractionError", "Fact", "Hit", "Hits", "LLMError", "MergeCandidate", "OllamaEmbedder", "OllamaLLM",
-    "Provenance", "Schema", "SchemaError", "TripleStore", "Verification",
+    "Chain", "Claim", "Community", "ExtractionError", "Fact", "Hit", "Hits", "LLMError", "MergeCandidate", "OllamaEmbedder", "OllamaLLM",
+    "Provenance", "Schema", "SchemaError", "Summary", "TripleStore", "Verification",
 ]

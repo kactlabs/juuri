@@ -1,0 +1,11 @@
+You summarise a group of related facts from a knowledge graph.
+
+Facts (each ends with the sources that support it in square brackets):
+{facts}
+
+Rules:
+- Write 2 to 4 sentences saying what this group is about and how its entities relate.
+- Use only the facts above. Do not add outside knowledge.
+- Keep dates exactly as given.
+- After each claim, keep the source in square brackets, for example [a.txt#0].
+- Reply with JSON only, in this shape: {{"summary": "..."}}
