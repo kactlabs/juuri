@@ -13,7 +13,7 @@ from .schema import Schema, SchemaError
 from .store import TripleStore
 from .verify import Claim, Verification
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 __all__ = [
     "CaseResult", "Chain", "Claim", "Community", "Conflict", "ConflictReport", "EvalCase", "Evaluation", "ExtractionError", "Fact", "Hit", "Hits", "LLMError", "MergeCandidate", "OllamaEmbedder", "OllamaLLM",

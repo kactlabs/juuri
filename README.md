@@ -8,7 +8,7 @@ pip install juuri
 
 ## Status
 
-v0.3: the knowledge-graph RAG loop works end to end, with temporal facts, root-cause tracing, grounding checks, entity resolution, community summaries, text-to-query, retrieval evaluation, conflict detection and exports. The API is early and may change.
+v0.4: the knowledge-graph RAG loop works end to end, with temporal facts, root-cause tracing, grounding checks, entity resolution, community summaries, text-to-query, retrieval evaluation, conflict detection, exports and saving to disk. The API is early and may change.
 
 | Step | What you get |
 |---|---|
