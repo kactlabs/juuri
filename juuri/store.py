@@ -7,9 +7,11 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .paths import Chain
 from .provenance import Provenance
+from .retrieve import Fact
 from .resolve import MergeCandidate, name_score
 from .retrieve import Hit, Hits, cosine, top_seeds
 from .schema import Schema, SchemaError
+from .temporal import DateLike, covers, parse_as_of, parse_date
 from .verify import Verification
 from .verify import verify as verify_answer
 
@@ -89,6 +91,8 @@ class TripleStore:
         chunk_id: Optional[str] = None,
         confidence: Optional[float] = None,
         timestamp: Optional[str] = None,
+        valid_from: DateLike = None,
+        valid_to: DateLike = None,
     ) -> int:
         """Add a triple and return its ID. Duplicates return the existing ID.
 
@@ -97,9 +101,19 @@ class TripleStore:
         Every call records a Provenance entry for the triple (timestamp
         defaults to now, UTC). Repeating a fact from a new source adds
         another entry. An identical entry is not stored twice.
+
+        valid_from / valid_to say when this evidence says the fact held.
+        Accepts "YYYY", "YYYY-MM", "YYYY-MM-DD", an int year, or a date.
+        A partial valid_from means the start of the period and a partial
+        valid_to means its end. Both ends are inclusive and None is open.
+        Different periods for the same triple are kept as separate records.
         """
         if confidence is not None and not 0.0 <= confidence <= 1.0:
             raise ValueError("confidence must be between 0 and 1")
+        valid_from = parse_date(valid_from)
+        valid_to = parse_date(valid_to, end=True)
+        if valid_from and valid_to and valid_from > valid_to:
+            raise ValueError(f"valid_from {valid_from} is after valid_to {valid_to}")
         for name, value in (("subject", subject), ("predicate", predicate), ("object", obj)):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
@@ -112,21 +126,21 @@ class TripleStore:
             self._types[obj] = ot
         tid = self._insert(subject, predicate, obj)
         ts = timestamp or datetime.now(timezone.utc).isoformat()
-        record = Provenance(source, chunk_id, confidence, ts)
+        record = Provenance(source, chunk_id, confidence, ts, valid_from, valid_to)
         records = self._prov.setdefault(tid, [])
-        if not any(r.source == source and r.chunk_id == chunk_id and r.confidence == confidence for r in records):
+        if not any(r.key == record.key for r in records):
             records.append(record)
         return tid
 
-    def _steps(self, entity: str, predicates, direction: str) -> List[Tuple[int, str]]:
+    def _steps(self, entity: str, predicates, direction: str, as_of: Optional[str] = None, include_undated: bool = True) -> List[Tuple[int, str]]:
         """Edges leaving `entity` as (triple id, entity reached), in insertion order."""
         out: List[Tuple[int, str]] = []
-        for tid in self._touching(entity, "out" if direction == "both" else direction):
+        for tid in self._touching(entity, "out" if direction == "both" else direction, as_of, include_undated):
             if predicates is None or self._terms.string(self._p[tid]) in predicates:
                 end = self._o[tid] if direction in ("out", "both") else self._s[tid]
                 out.append((tid, self._terms.string(end)))
         if direction == "both":
-            for tid in self._touching(entity, "in"):
+            for tid in self._touching(entity, "in", as_of, include_undated):
                 if predicates is None or self._terms.string(self._p[tid]) in predicates:
                     out.append((tid, self._terms.string(self._s[tid])))
         return out
@@ -149,14 +163,18 @@ class TripleStore:
         predicates: Optional[Sequence[str]] = None,
         direction: str = "out",
         limit: int = 10,
+        as_of: DateLike = None,
+        include_undated: bool = True,
     ) -> List[Chain]:
         """Find simple paths (no repeated entity) from source to target, shortest first.
 
         predicates: only follow these relation names (default: all).
         direction: "out" follows subject -> object, "in" the reverse, "both" either way.
+        as_of: only follow facts valid on this day (see find()).
         Returns at most `limit` chains. Empty if there is no path.
         """
         _check_walk(direction, max_hops)
+        day = None if as_of is None else parse_as_of(as_of)
         if limit < 1:
             raise ValueError("limit must be >= 1")
         source, target = self.canonical(source), self.canonical(target)
@@ -169,7 +187,7 @@ class TripleStore:
             node, tids, visited = queue.popleft()
             if len(tids) >= max_hops:
                 continue
-            for tid, other in self._steps(node, allowed, direction):
+            for tid, other in self._steps(node, allowed, direction, day, include_undated):
                 if other in visited:
                     continue
                 if other == target:
@@ -180,15 +198,25 @@ class TripleStore:
                     queue.append((other, tids + [tid], visited | {other}))
         return results
 
-    def chains(self, entity: str, relation: str, direction: str = "out", max_hops: int = 10) -> List[Chain]:
+    def chains(
+        self,
+        entity: str,
+        relation: str,
+        direction: str = "out",
+        max_hops: int = 10,
+        as_of: DateLike = None,
+        include_undated: bool = True,
+    ) -> List[Chain]:
         """Follow `relation` from `entity` until each branch ends.
 
         Returns one Chain per branch. A branch ends when no edge continues
         (the end entity), when it would revisit an entity (cyclic=True) or
         when max_hops is reached (truncated=True). A known entity with no
         matching edge gives one empty chain. An unknown entity gives [].
+        With as_of, only facts valid on that day are followed.
         """
         _check_walk(direction, max_hops)
+        day = None if as_of is None else parse_as_of(as_of)
         entity = self.canonical(entity)
         term = self._terms.lookup(entity)
         if term is None or (term not in self._by_s and term not in self._by_o):
@@ -197,7 +225,7 @@ class TripleStore:
         stack = [(entity, [], {entity})]
         while stack:
             node, tids, visited = stack.pop()
-            nxt = self._steps(node, {relation}, direction)
+            nxt = self._steps(node, {relation}, direction, day, include_undated)
             if not nxt:
                 results.append(self._chain(entity, node, tids))
             elif len(tids) >= max_hops:
@@ -212,17 +240,17 @@ class TripleStore:
                 stack.extend(reversed(fresh))
         return results
 
-    def root_cause(self, entity: str, relation: str = "CAUSED_BY", max_hops: int = 10) -> List[Chain]:
+    def root_cause(self, entity: str, relation: str = "CAUSED_BY", max_hops: int = 10, as_of: DateLike = None, include_undated: bool = True) -> List[Chain]:
         """Follow `relation` (subject -> object) from `entity` to the end of each branch.
 
         With CAUSED_BY, "A CAUSED_BY B" means B is a cause of A, so each
-        chain ends at a root cause.
+        chain ends at a root cause. With as_of, only facts valid on that day count.
         """
-        return self.chains(entity, relation, "out", max_hops)
+        return self.chains(entity, relation, "out", max_hops, as_of, include_undated)
 
-    def blast_radius(self, entity: str, relation: str = "CAUSED_BY", max_hops: int = 10) -> List[Chain]:
+    def blast_radius(self, entity: str, relation: str = "CAUSED_BY", max_hops: int = 10, as_of: DateLike = None, include_undated: bool = True) -> List[Chain]:
         """Follow `relation` backwards from `entity`: what it led to, branch by branch."""
-        return self.chains(entity, relation, "in", max_hops)
+        return self.chains(entity, relation, "in", max_hops, as_of, include_undated)
 
     def verify(self, answer: str, hits: Hits, llm) -> Verification:
         """Check an LLM answer against retrieved hits. Requires a schema.
@@ -320,7 +348,7 @@ class TripleStore:
             tid = self._insert(mapping.get(s, s), p, mapping.get(o, o))
             kept = self._prov.setdefault(tid, [])
             for r in records:
-                if not any(k.source == r.source and k.chunk_id == r.chunk_id and k.confidence == r.confidence for k in kept):
+                if not any(k.key == r.key for k in kept):
                     kept.append(r)
 
     def suggest_merges(self, threshold: float = 0.85, min_embedding: Optional[float] = None) -> List[MergeCandidate]:
@@ -405,16 +433,20 @@ class TripleStore:
         expand: Optional[Sequence[str]] = None,
         direction: str = "both",
         min_score: float = 0.0,
+        as_of: DateLike = None,
+        include_undated: bool = True,
     ) -> Hits:
         """Find seed entities by vector similarity, then expand `hops` steps.
 
         expand: only follow these relation names (default: all).
         direction: "out" follows subject -> object, "in" the reverse, "both" either way.
+        as_of: only use facts valid on this day (see find()).
         Seeds scoring below min_score are ignored. Call embed() first.
         Triples are ordered by hop, then by seed score.
         """
         if direction not in ("out", "in", "both"):
             raise ValueError("direction must be 'out', 'in' or 'both'")
+        day = None if as_of is None else parse_as_of(as_of)
         if hops < 0 or seeds < 1:
             raise ValueError("hops must be >= 0 and seeds >= 1")
         if not self._emb:
@@ -430,7 +462,7 @@ class TripleStore:
             for hop in range(hops + 1):
                 nxt = set()
                 for ent in frontier:
-                    for tid in self._touching(ent, direction):
+                    for tid in self._touching(ent, direction, day, include_undated):
                         if allowed is not None and self._terms.string(self._p[tid]) not in allowed:
                             continue
                         prev = best.get(tid)
@@ -457,7 +489,7 @@ class TripleStore:
         }
         return Hits(query=query, seeds=seed_list, hits=hits, chunks=chunks)
 
-    def _touching(self, entity: str, direction: str) -> List[int]:
+    def _touching(self, entity: str, direction: str, as_of: Optional[str] = None, include_undated: bool = True) -> List[int]:
         term = self._terms.lookup(entity)
         if term is None:
             return []
@@ -466,7 +498,26 @@ class TripleStore:
             out.extend(self._by_s.get(term, ()))
         if direction in ("in", "both"):
             out.extend(self._by_o.get(term, ()))
+        if as_of is not None:
+            out = [t for t in out if covers(self._prov.get(t, ()), as_of, include_undated)]
         return out
+
+    def history(self, subject: Optional[str] = None, predicate: Optional[str] = None, obj: Optional[str] = None) -> List[Fact]:
+        """Every matching triple with its validity periods, oldest first.
+
+        Each Fact lists the distinct (valid_from, valid_to) periods from its
+        provenance, with None for open ends. Undated evidence adds no period.
+        Facts with no dated period sort last.
+        """
+        facts: List[Fact] = []
+        for tid in self._candidates(subject, predicate, obj):
+            periods = sorted(
+                {(r.valid_from, r.valid_to) for r in self._prov.get(tid, ()) if r.valid_from or r.valid_to},
+                key=lambda p: (p[0] or "", p[1] or "9999-12-31"),
+            )
+            facts.append(Fact(self.get(tid), tuple(periods), tuple(self._prov.get(tid, ()))))
+        facts.sort(key=lambda f: (not f.periods, f.periods[0][0] or "" if f.periods else "", f.triple))
+        return facts
 
     def provenance(self, subject: str, predicate: str, obj: str) -> List[Provenance]:
         """Return all provenance records for a triple. Empty if the triple is unknown."""
@@ -525,6 +576,7 @@ class TripleStore:
                         t["subject"], t["predicate"], t["object"],
                         t["subject_type"], t["object_type"],
                         source=name, chunk_id=chunk_id, confidence=t["confidence"],
+                        valid_from=t.get("valid_from"), valid_to=t.get("valid_to"),
                     )
                 except SchemaError:
                     continue  # e.g. entity already typed differently
@@ -585,10 +637,20 @@ class TripleStore:
         subject: Optional[str] = None,
         predicate: Optional[str] = None,
         obj: Optional[str] = None,
+        as_of: DateLike = None,
+        include_undated: bool = True,
     ) -> Iterator[Triple]:
-        """Yield triples matching the given terms. None acts as a wildcard."""
+        """Yield triples matching the given terms. None acts as a wildcard.
+
+        as_of: a full date ("YYYY-MM-DD" or a date) keeps only facts valid on
+        that day. A fact with dated evidence is valid if one of its periods
+        contains the day. A fact with no dated evidence is kept only if
+        include_undated is True (the default).
+        """
+        day = None if as_of is None else parse_as_of(as_of)
         for tid in self._candidates(subject, predicate, obj):
-            yield self.get(tid)
+            if day is None or covers(self._prov.get(tid, ()), day, include_undated):
+                yield self.get(tid)
 
     def _candidates(self, subject, predicate, obj) -> Iterator[int]:
         subject = None if subject is None else self.canonical(subject)

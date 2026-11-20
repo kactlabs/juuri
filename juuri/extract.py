@@ -5,6 +5,7 @@ from importlib import resources
 from typing import Any, Dict, Iterator, List
 
 from .schema import Schema
+from .temporal import parse_date
 
 
 class ExtractionError(ValueError):
@@ -80,6 +81,13 @@ def parse_triples(raw: str, schema: Schema) -> List[Dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         triple["confidence"] = min(max(conf, 0.0), 1.0)
+        try:
+            triple["valid_from"] = parse_date(item.get("valid_from"))
+            triple["valid_to"] = parse_date(item.get("valid_to"), end=True)
+        except ValueError:
+            continue  # unreadable date: skip the triple instead of guessing
+        if triple["valid_from"] and triple["valid_to"] and triple["valid_from"] > triple["valid_to"]:
+            continue
         try:
             schema.check(triple["subject_type"], triple["predicate"], triple["object_type"])
         except ValueError:

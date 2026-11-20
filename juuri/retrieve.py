@@ -21,6 +21,19 @@ class Hit:
     provenance: Tuple[Provenance, ...]
 
 
+@dataclass(frozen=True)
+class Fact:
+    """A triple with its validity periods, from TripleStore.history().
+
+    periods: distinct (valid_from, valid_to) pairs as ISO dates, None for an open end.
+    Empty if no evidence for the triple is dated.
+    """
+
+    triple: Tuple[str, str, str]
+    periods: Tuple[Tuple[Optional[str], Optional[str]], ...]
+    provenance: Tuple[Provenance, ...]
+
+
 @dataclass
 class Hits:
     query: str
@@ -59,7 +72,7 @@ class Hits:
         used += count(header)
         for hit in self.hits:
             refs = _refs(hit)
-            line = f"- {hit.triple[0]} {hit.triple[1]} {hit.triple[2]} [{', '.join(refs)}]"
+            line = f"- {hit.triple[0]} {hit.triple[1]} {hit.triple[2]}{_validity_note(hit.provenance)} [{', '.join(refs)}]"
             cost = count(line)
             if used + cost > tokens:
                 continue
@@ -93,6 +106,23 @@ class Hits:
 def estimate_tokens(text: str) -> int:
     """Rough token estimate: about 1 token per 4 characters."""
     return max(1, (len(text) + 3) // 4)
+
+
+def _validity_note(provenance) -> str:
+    """" (valid 2008-01-01 to 2016-12-31)" for dated evidence, or "" if none is dated."""
+    periods: List[str] = []
+    for p in provenance:
+        if p.valid_from and p.valid_to:
+            text = f"{p.valid_from} to {p.valid_to}"
+        elif p.valid_from:
+            text = f"from {p.valid_from}"
+        elif p.valid_to:
+            text = f"until {p.valid_to}"
+        else:
+            continue
+        if text not in periods:
+            periods.append(text)
+    return f" (valid {'; '.join(periods)})" if periods else ""
 
 
 def _refs(hit: "Hit") -> List[str]:

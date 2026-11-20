@@ -12,6 +12,7 @@ Rules:
 - Extract every fact in the text that fits the schema, not just the first one.
 - Reply with JSON only, in this shape: {{"triples": [{{"subject": "...", "subject_type": "...", "predicate": "...", "object": "...", "object_type": "...", "confidence": 0.9}}]}}
 - "confidence" is a number between 0 and 1.
+- If the text says when a fact was true, add "valid_from" and/or "valid_to" as "YYYY", "YYYY-MM" or "YYYY-MM-DD". Use "valid_from" for when it started and "valid_to" for when it ended. Leave a key out when the text gives no date for it. Never guess a date.
 - If the text has no facts that fit the schema, reply with {{"triples": []}}.
 
 Text:

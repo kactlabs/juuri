@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 from .provenance import Provenance
-from .retrieve import _refs
+from .retrieve import _refs, _validity_note
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,8 @@ class Chain:
         lines = [f"{title}:"]
         for i, (triple, prov) in enumerate(zip(self.triples, self.provenance), 1):
             fake_hit = _HitLike(prov)
-            lines.append(f"{i}. {triple[0]} {triple[1]} {triple[2]} [{', '.join(_refs(fake_hit))}]")
+            note = _validity_note(prov)
+            lines.append(f"{i}. {triple[0]} {triple[1]} {triple[2]}{note} [{', '.join(_refs(fake_hit))}]")
         if not self.triples:
             lines.append(f"{self.start} (no further links)")
         if self.cyclic:
