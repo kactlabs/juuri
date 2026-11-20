@@ -1,9 +1,10 @@
 """Lightweight ontology: classes, typed relations, subclasses and rules."""
 
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 _SIMPLE_RULES = {"transitive", "symmetric"}
 _PARAM_RULES = {"implies", "inverse"}
+_SIMPLE_CONSTRAINTS = {"functional", "inverse_functional"}
 
 
 class SchemaError(ValueError):
@@ -16,6 +17,12 @@ class Schema:
     relations: {name: (domain_class, range_class)}
     rules: {relation: "transitive" | "symmetric" | "implies:OTHER" | "inverse:OTHER"}
     subclasses: {child_class: parent_class}
+    constraints: {relation: constraint or list of constraints}, used by
+        TripleStore.conflicts() to find contradicting facts:
+        "functional"          a subject has at most one object (BORN_IN)
+        "inverse_functional"  an object has at most one subject (HEADQUARTERED_AT is not, FOUNDED_BY_ONLY is)
+        "exclusive:OTHER"     the relation and OTHER cannot both hold between the same pair
+    Constraints are checked on demand. add() does not reject conflicting facts.
     """
 
     def __init__(
@@ -24,12 +31,31 @@ class Schema:
         relations: Mapping[str, Tuple[str, str]],
         rules: Optional[Mapping[str, str]] = None,
         subclasses: Optional[Mapping[str, str]] = None,
+        constraints: Optional[Mapping[str, Union[str, Sequence[str]]]] = None,
     ) -> None:
         self.classes = set(classes)
         self.relations: Dict[str, Tuple[str, str]] = dict(relations)
         self.rules: Dict[str, str] = dict(rules or {})
         self.subclasses: Dict[str, str] = dict(subclasses or {})
+        self.constraints: Dict[str, Tuple[str, ...]] = {}
         self._validate()
+        self._validate_constraints(constraints or {})
+
+    def _validate_constraints(self, constraints: Mapping[str, Union[str, Sequence[str]]]) -> None:
+        for name, value in constraints.items():
+            if name not in self.relations:
+                raise SchemaError(f"constraint for undeclared relation '{name}'")
+            items = [value] if isinstance(value, str) else list(value)
+            if not items:
+                raise SchemaError(f"empty constraint list for relation '{name}'")
+            for item in items:
+                kind, _, arg = item.partition(":") if isinstance(item, str) else ("", "", "")
+                if kind in _SIMPLE_CONSTRAINTS and not arg:
+                    continue
+                if kind == "exclusive" and arg in self.relations and arg != name:
+                    continue
+                raise SchemaError(f"invalid constraint '{item}' for relation '{name}'")
+            self.constraints[name] = tuple(dict.fromkeys(items))
 
     def _validate(self) -> None:
         for child, parent in self.subclasses.items():

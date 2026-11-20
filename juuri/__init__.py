@@ -1,4 +1,5 @@
 from .community import Community, Summary
+from .conflicts import Conflict, ConflictReport
 from .evaluate import CaseResult, EvalCase, Evaluation
 from .extract import ExtractionError
 from .llm import LLMError, OllamaEmbedder, OllamaLLM
@@ -14,6 +15,6 @@ from .verify import Claim, Verification
 __version__ = "0.2.0"
 
 __all__ = [
-    "CaseResult", "Chain", "Claim", "Community", "EvalCase", "Evaluation", "ExtractionError", "Fact", "Hit", "Hits", "LLMError", "MergeCandidate", "OllamaEmbedder", "OllamaLLM",
+    "CaseResult", "Chain", "Claim", "Community", "Conflict", "ConflictReport", "EvalCase", "Evaluation", "ExtractionError", "Fact", "Hit", "Hits", "LLMError", "MergeCandidate", "OllamaEmbedder", "OllamaLLM",
     "Provenance", "QueryError", "QueryResult", "Row", "Schema", "SchemaError", "Summary", "TripleStore", "Verification",
 ]

@@ -8,6 +8,7 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .community import Community, Summary, louvain, parse_summary, split_components
 from .community import build_prompt as community_prompt
+from .conflicts import ConflictReport, find_conflicts
 from .evaluate import Evaluation, evaluate_retrieval, tune_retrieval
 from .paths import Chain
 from .provenance import Provenance
@@ -529,6 +530,26 @@ class TripleStore:
             used += count(entry)
             lines.append(entry)
         return "\n".join([header, *lines]) if lines else ""
+
+    def conflicts(
+        self,
+        as_of: DateLike = None,
+        include_undated: bool = True,
+        relations: Optional[Sequence[str]] = None,
+        cross_source_only: bool = False,
+        limit: int = 1000,
+    ) -> ConflictReport:
+        """Find facts that contradict each other under the schema's `constraints`.
+
+        Two facts conflict if a constraint forbids them together and their
+        validity periods overlap. If either fact has no dated evidence the
+        overlap cannot be ruled out, so it is reported with undated=True.
+        as_of: only facts valid on that day. include_undated=False ignores
+        undated facts. relations: only conflicts involving these relations.
+        cross_source_only: only conflicts where the two sides share no source.
+        Proven conflicts come first. Requires a schema.
+        """
+        return find_conflicts(self, as_of, include_undated, relations, cross_source_only, limit)
 
     def evaluate(self, embedder, cases, tokens: int = 2000, count_tokens=None, **retrieve_args) -> Evaluation:
         """Score retrieval against gold cases. See juuri.evaluate for the case format.
