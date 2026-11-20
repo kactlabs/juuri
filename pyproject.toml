@@ -1,13 +1,21 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "juuri"
-version = "0.3.0"
-description = "juuri placeholder package"
+version = "0.3.2"
+description = "Knowledge Graphs for RAG. Nothing else."
 readme = "README.md"
-requires-python = ">=3.8"
+authors = [{ name = "KactLabs" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+keywords = ["knowledge graph", "rag", "llm", "triples", "ontology"]
+
+[project.urls]
+Homepage = "https://github.com/kactlabs/juuri"
+Source = "https://github.com/kactlabs/juuri"
 
 [project.optional-dependencies]
 networkx = ["networkx"]
